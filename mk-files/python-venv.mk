@@ -59,7 +59,7 @@ $(PYBIN):
 	$(PY) -m venv $(VENV)
 
 # Install deps if any input changed or venv was recreated
-$(STAMP): $(PYBIN) $(DEPS)
+$(STAMP): $(DEPS) | $(PYBIN)
 	$(PIP) install -U pip
 	@set -e; \
 	if [ -f poetry.lock ]; then \
