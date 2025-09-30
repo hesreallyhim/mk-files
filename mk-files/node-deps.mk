@@ -6,7 +6,9 @@
 # Features:
 # - Automatically detects which package manager to use (pnpm, yarn, npm, or bun)
 #   based on lockfiles present in the project
-# - Creates node_modules/ directory if it doesn't exist
+# - Handles all Yarn nodeLinker modes: pnp (default), pnpm, node-modules
+# - Detects Yarn linker configuration from .yarnrc.yml
+# - Works with pnpm's content-addressable store
 # - Uses a stamp file to track dependencies and only re-installs when
 #   dependency files change, avoiding unnecessary reinstalls
 # - Provides standard targets: install, run, clean, reinstall
@@ -15,6 +17,7 @@
 # - Drop into any Node.js project to standardize dependency management across teams
 # - Reduces boilerplate in project-specific Makefiles
 # - Handles different package managers (pnpm, yarn, npm, bun) automatically
+# - Works with all Yarn linker modes (PnP, pnpm-style, node-modules)
 # - Ensures reproducible environments with minimal configuration
 # - Perfect complement to python-venv.mk for polyglot projects
 #
@@ -25,11 +28,12 @@
 # ---- config ----
 NODE_MODULES := node_modules
 NODE         := node
-STAMP        := $(NODE_MODULES)/.deps-ok
+# Use a project-root stamp file that works regardless of install strategy
+STAMP        := .deps-ok
 
 # Dependency inputs that should trigger re-install when they change.
 # Only the files that actually exist will be considered (via $(wildcard ...)).
-DEPS := $(wildcard package.json package-lock.json yarn.lock pnpm-lock.yaml bun.lockb)
+DEPS := $(wildcard package.json package-lock.json yarn.lock pnpm-lock.yaml bun.lockb .yarnrc.yml .npmrc)
 
 .PHONY: help all install run clean reinstall node-modules
 
@@ -40,31 +44,31 @@ help:  ## Display this help message
 	@echo "  help       - Display this help message"
 	@echo "  install    - Install dependencies using detected package manager"
 	@echo "  run        - Install dependencies and run index.js"
-	@echo "  clean      - Remove node_modules"
+	@echo "  clean      - Remove dependencies (node_modules, .pnp.*, .yarn/cache, etc.)"
 	@echo "  reinstall  - Clean and reinstall from scratch"
 	@echo "  all        - Default target (runs 'run')"
 	@echo ""
 	@echo "Configuration variables:"
-	@echo "  NODE_MODULES = $(NODE_MODULES)   - Dependencies directory"
+	@echo "  NODE_MODULES = $(NODE_MODULES)   - Dependencies directory (for traditional installs)"
 	@echo "  NODE         = $(NODE)            - Node.js interpreter"
+	@echo "  STAMP        = $(STAMP)           - Stamp file location"
 	@echo ""
 	@echo "Detected dependency files:"
 	@echo "  $(DEPS)"
 	@echo ""
 	@echo "Package manager detection priority:"
 	@echo "  1. pnpm (pnpm-lock.yaml)"
-	@echo "  2. yarn (yarn.lock)"
+	@echo "  2. yarn (yarn.lock, auto-detects nodeLinker: pnp/pnpm/node-modules)"
 	@echo "  3. bun (bun.lockb)"
 	@echo "  4. npm (package-lock.json or fallback)"
 
 all: run
 
-# Create node_modules if missing
-$(NODE_MODULES):
-	@mkdir -p $(NODE_MODULES)
-
-# Install deps if any input changed or node_modules was recreated
-$(STAMP): $(NODE_MODULES) $(DEPS)
+# Install deps if any input changed
+# Note: We don't depend on $(NODE_MODULES) existing because:
+# - Yarn PnP (nodeLinker: pnp) doesn't create node_modules
+# - pnpm uses a content-addressable store with symlinks
+$(STAMP): $(DEPS)
 	@set -e; \
 	if [ -f pnpm-lock.yaml ]; then \
 		echo "[install] using pnpm (pnpm-lock.yaml detected)"; \
@@ -76,9 +80,18 @@ $(STAMP): $(NODE_MODULES) $(DEPS)
 			exit 1; \
 		fi; \
 	elif [ -f yarn.lock ]; then \
-		echo "[install] using yarn (yarn.lock detected)"; \
 		if command -v yarn >/dev/null 2>&1; then \
-			yarn install --frozen-lockfile; \
+			LINKER="pnp (default)"; \
+			if [ -f .yarnrc.yml ]; then \
+				if grep -q "nodeLinker:" .yarnrc.yml 2>/dev/null; then \
+					DETECTED=$$(grep "nodeLinker:" .yarnrc.yml | sed 's/.*nodeLinker:[[:space:]]*//; s/[[:space:]]*$$//'); \
+					if [ -n "$$DETECTED" ]; then \
+						LINKER="$$DETECTED"; \
+					fi; \
+				fi; \
+			fi; \
+			echo "[install] using yarn (yarn.lock detected, nodeLinker: $$LINKER)"; \
+			yarn install --immutable; \
 		else \
 			echo "ERROR: yarn.lock found but yarn not installed"; \
 			echo "Install yarn: npm install -g yarn"; \
@@ -117,4 +130,14 @@ reinstall: clean
 	@$(MAKE) install
 
 clean:
-	rm -rf $(NODE_MODULES)
+	@echo "[clean] Removing dependencies..."
+	@# Traditional node_modules (npm, bun, yarn with nodeLinker: node-modules)
+	@rm -rf $(NODE_MODULES)
+	@# Yarn PnP artifacts (nodeLinker: pnp)
+	@rm -rf .pnp.* .yarn/cache .yarn/unplugged .yarn/build-state.yml .yarn/install-state.gz
+	@# Yarn pnpm mode artifacts (nodeLinker: pnpm)
+	@rm -rf .yarn/cache .yarn/unplugged
+	@# Bun cache
+	@rm -rf node_modules.bun
+	@# Stamp file
+	@rm -f $(STAMP)
